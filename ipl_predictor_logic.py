@@ -364,3 +364,23 @@ def predict_win_probability(win_pipeline, batting_team, bowling_team, city, venu
         # fallback
         idx = 1 if len(proba) > 1 else 0
     return float(proba[idx])
+
+
+
+def train_and_save_models(full_data, model_dir="models"):
+    """Train all models and save them into a models folder."""
+    Path(model_dir).mkdir(parents=True, exist_ok=True)
+
+    # Train
+    batsman_pipe = train_batsman_pipeline(full_data)
+    bowler_runs_pipe, bowler_wickets_pipe = train_bowler_pipelines(full_data)
+    win_pipe = train_win_pipeline(full_data)
+
+    # Save
+    joblib.dump(batsman_pipe, f"{model_dir}/batsman_pipe.pkl")
+    joblib.dump(bowler_runs_pipe, f"{model_dir}/bowler_runs_pipe.pkl")
+    joblib.dump(bowler_wickets_pipe, f"{model_dir}/bowler_wickets_pipe.pkl")
+    joblib.dump(win_pipe, f"{model_dir}/win_pipe.pkl")
+
+    print("✅ All models trained and saved successfully.")
+    return batsman_pipe, bowler_runs_pipe, bowler_wickets_pipe, win_pipe
