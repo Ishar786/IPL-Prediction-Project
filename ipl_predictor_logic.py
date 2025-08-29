@@ -97,45 +97,51 @@ def train_bowler_pipelines(full_data):
 
 def train_win_pipeline(full_data):
     """Trains and returns the match win prediction pipeline for the 2nd innings."""
-    
-    # Filter only 2nd innings
+
+    # Filter only 2nd innings data
     win_df = full_data[full_data['inning'] == 2].copy()
-    
-    # Ensure 'target_runs' column is available
+
+    # Calculate target_runs if missing
     if 'target_runs' not in win_df.columns:
-        # Get total runs from first innings
         first_innings_runs = full_data[full_data['inning'] == 1] \
             .groupby('match_id')['total_runs'].sum().reset_index()
         first_innings_runs.rename(columns={'total_runs': 'target_runs'}, inplace=True)
         first_innings_runs['target_runs'] += 1  # Add 1 run to win
-        
-        # Merge with second innings data only
+
+        # Merge target_runs into second innings data
         win_df = win_df.merge(first_innings_runs, on='match_id', how='left')
 
-        # Check if there are missing target_runs values after merging
+        # Check if merge succeeded
         if win_df['target_runs'].isnull().any():
-            raise ValueError("Missing 'target_runs' values after merging first innings data. Check the merge logic.")
-    
-    # Create features
+            missing_matches = win_df[win_df['target_runs'].isnull()]['match_id'].unique()
+            print(f"Warning: Missing target_runs for match_id(s): {missing_matches}")
+
+            # Option 1: Drop rows where target_runs is missing
+            win_df = win_df.dropna(subset=['target_runs'])
+            # Option 2: Or fill with some default value (e.g., max runs + 1)
+            # max_runs = full_data['total_runs'].max()
+            # win_df['target_runs'].fillna(max_runs + 1, inplace=True)
+
+    # Compute features for win prediction
     win_df['current_score'] = win_df.groupby('match_id')['total_runs'].cumsum()
     win_df['runs_left'] = win_df['target_runs'] - win_df['current_score']
     win_df['balls_left'] = 120 - (win_df['over'] * 6 + win_df['ball'])
     win_df['wickets_left'] = 10 - win_df.groupby('match_id')['is_wicket'].cumsum()
 
-    # Filter valid balls
+    # Filter valid rows
     win_df = win_df[win_df['balls_left'] >= 0]
 
-    # Create label
+    # Create target label
     win_df['result'] = (win_df['batting_team'] == win_df['winner']).astype(int)
 
-    # Select final features
+    # Select features and drop rows with any missing values
     final_df = win_df[['batting_team', 'bowling_team', 'city', 'runs_left', 'balls_left', 'wickets_left', 'target_runs', 'result']].dropna()
 
-    # Split X and y
+    # Split features and label
     X = final_df.drop('result', axis=1)
     y = final_df['result']
 
-    # Build and train pipeline
+    # Define pipeline
     pipe = Pipeline(steps=[
         ('preprocessor', ColumnTransformer([
             ('encoder', OneHotEncoder(sparse_output=False, handle_unknown='ignore'), ['batting_team', 'bowling_team', 'city'])
