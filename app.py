@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-# Import all the necessary functions from your backend logic file
+# Import backend logic
 from ipl_predictor_logic import (
     load_raw_data,
     get_ui_and_role_data,
@@ -9,12 +9,12 @@ from ipl_predictor_logic import (
     train_win_pipeline
 )
 
-# Set the page configuration for a wider layout
+# Set wide layout
 st.set_page_config(layout="wide")
 
 @st.cache_data
 def load_and_train_models():
-    """Loads raw data and trains all necessary models."""
+    """Load data and train all models (cached for speed)."""
     print("CACHE MISS: Loading data and training models...")
     raw_data = load_raw_data()
     ui_data = get_ui_and_role_data(raw_data)
@@ -23,6 +23,7 @@ def load_and_train_models():
     win_pipe = train_win_pipeline(raw_data)
     print("Models trained and cached successfully.")
     return ui_data, batsman_pipe, bowler_runs_pipe, bowler_wickets_pipe, win_pipe
+
 
 # --- Load Models and UI Data ---
 try:
@@ -40,6 +41,7 @@ except FileNotFoundError as e:
     st.info("Please make sure 'matches.csv' and 'deliveries.csv' are in the same folder as this app.")
     st.stop()
 
+
 # --- Main App Layout ---
 st.title('🏏 IPL Performance and Win Predictor')
 st.markdown("---")
@@ -48,7 +50,10 @@ st.markdown("---")
 app_mode = st.sidebar.selectbox('Choose Prediction Type',
     ['Player Performance Prediction', 'Match Win Prediction'])
 
-# --- UI for Player Performance Prediction ---
+
+# =========================================================
+# Player Performance Prediction
+# =========================================================
 if app_mode == 'Player Performance Prediction':
     st.header('🔮 Player Performance Prediction')
 
@@ -64,32 +69,27 @@ if app_mode == 'Player Performance Prediction':
         role = player_roles.get(selected_player, 'Unknown')
         st.subheader(f'Prediction for {selected_player} ({role})')
 
+        # Batsman predictions
         if role in ['Batsman', 'All-Rounder']:
-            input_df_bat = pd.DataFrame({
-                'batsman': [selected_player],
-                'bowling_team': [opponent_team],
-                'venue': [venue]
-            })
-            predicted_score = batsman_pipe.predict(input_df_bat)[0]
-            st.metric(label="Predicted Score", value=f"~ {predicted_score:.1f} runs")
+            input_df_bat = pd.DataFrame({'batsman': [selected_player]})
+            predicted_runs = batsman_pipe.predict(input_df_bat)[0]
+            st.metric(label="Predicted Runs", value=f"~ {predicted_runs:.1f} runs")
 
+        # Bowler predictions
         if role in ['Bowler', 'All-Rounder']:
-            input_df_bowl = pd.DataFrame({
-                'bowler': [selected_player],
-                'batting_team': [opponent_team],
-                'venue': [venue]
-            })
+            input_df_bowl = pd.DataFrame({'bowler': [selected_player]})
             predicted_runs = bowler_runs_pipe.predict(input_df_bowl)[0]
             predicted_wickets = bowler_wickets_pipe.predict(input_df_bowl)[0]
-            st.metric(
-                label="Predicted Bowling Figures",
-                value=f"{predicted_wickets:.1f} wickets for {predicted_runs:.1f} runs"
-            )
+            st.metric(label="Predicted Wickets", value=f"~ {predicted_wickets:.1f}")
+            st.metric(label="Predicted Runs Conceded", value=f"~ {predicted_runs:.1f}")
 
         if role == 'Unknown':
             st.warning("Player has limited historical data for a defined role. Predictions may be less accurate.")
 
-# --- UI for Match Win Prediction ---
+
+# =========================================================
+# Match Win Prediction
+# =========================================================
 elif app_mode == 'Match Win Prediction':
     st.header('📊 Live Match Win Probability (2nd Innings)')
 
@@ -119,19 +119,26 @@ elif app_mode == 'Match Win Prediction':
             balls_left = 120 - (int(overs) * 6 + round((overs % 1) * 10))
             wickets_left = 10 - wickets
 
+            # Handle edge cases
             if runs_left <= 0:
                 st.success(f"{batting_team} has a 100% win probability.")
             elif balls_left <= 0 or wickets_left <= 0:
                 st.error(f"{batting_team} has a 0% win probability.")
             else:
                 input_df = pd.DataFrame({
-                    'batting_team': [batting_team], 'bowling_team': [bowling_team], 'city': [city],
-                    'runs_left': [runs_left], 'balls_left': [balls_left], 'wickets_left': [wickets_left],
+                    'batting_team': [batting_team],
+                    'bowling_team': [bowling_team],
+                    'city': [city],
+                    'runs_left': [runs_left],
+                    'balls_left': [balls_left],
+                    'wickets_left': [wickets_left],
                     'target_runs': [target]
                 })
 
-                result = win_pipe.predict_proba(input_df)
-                win_prob, loss_prob = result[0][1], result[0][0]
+                # Regression output → clamp between 0 and 1
+                win_prob = win_pipe.predict(input_df)[0]
+                win_prob = max(0, min(1, win_prob))
+                loss_prob = 1 - win_prob
 
                 st.subheader('Prediction Probabilities')
                 col7, col8 = st.columns(2)
@@ -139,4 +146,5 @@ elif app_mode == 'Match Win Prediction':
                     st.metric(label=f"{batting_team} Win %", value=f"{win_prob:.0%}")
                 with col8:
                     st.metric(label=f"{bowling_team} Win %", value=f"{loss_prob:.0%}")
+
                 st.progress(win_prob)

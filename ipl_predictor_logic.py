@@ -2,8 +2,7 @@ import pandas as pd
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder
-from sklearn.linear_model import LogisticRegression, LinearRegression
-
+from sklearn.linear_model import LinearRegression
 
 # -------------------------------------------------------
 # Load Data
@@ -18,8 +17,9 @@ def load_raw_data():
     if "batter" in deliveries.columns and "batsman" not in deliveries.columns:
         deliveries = deliveries.rename(columns={"batter": "batsman"})
 
+    # Merge venue & city too
     full_data = deliveries.merge(
-        matches[["match_id", "city", "winner"]],
+        matches[["match_id", "city", "venue", "winner"]],
         on="match_id",
         how="left"
     )
@@ -27,15 +27,30 @@ def load_raw_data():
 
 
 # -------------------------------------------------------
-# UI and Role Data (for dropdowns etc.)
+# UI and Role Data
 # -------------------------------------------------------
 def get_ui_and_role_data(full_data):
     teams = sorted(full_data["batting_team"].dropna().unique().tolist())
-    venues = sorted(full_data["venue"].dropna().unique().tolist()) if "venue" in full_data.columns else []
+    venues = sorted(full_data["venue"].dropna().unique().tolist())
     cities = sorted(full_data["city"].dropna().unique().tolist())
     players = sorted(full_data["batsman"].dropna().unique().tolist())
 
-    player_roles = {p: "Batsman" for p in players}  # placeholder
+    # Derive simple roles based on available data
+    bat_counts = full_data.groupby("batsman")["batsman_runs"].sum()
+    bowl_counts = full_data.groupby("bowler")["is_wicket"].sum()
+
+    player_roles = {}
+    for p in players:
+        bat_score = bat_counts.get(p, 0)
+        bowl_score = bowl_counts.get(p, 0)
+        if bat_score > 500 and bowl_score > 50:
+            player_roles[p] = "All-Rounder"
+        elif bat_score > 500:
+            player_roles[p] = "Batsman"
+        elif bowl_score > 50:
+            player_roles[p] = "Bowler"
+        else:
+            player_roles[p] = "Unknown"
 
     return {
         "teams": teams,
@@ -47,12 +62,10 @@ def get_ui_and_role_data(full_data):
 
 
 # -------------------------------------------------------
-# Batsman performance model (regression for numeric runs)
+# Batsman performance model (regression)
 # -------------------------------------------------------
 def train_batsman_pipeline(full_data):
-    df = full_data.copy()
-    df = df.groupby("batsman")["batsman_runs"].mean().reset_index(name="avg_runs")
-
+    df = full_data.groupby("batsman")["batsman_runs"].mean().reset_index(name="avg_runs")
     X = df[["batsman"]]
     y = df["avg_runs"]
 
@@ -62,15 +75,14 @@ def train_batsman_pipeline(full_data):
 
     pipe = Pipeline([
         ("pre", pre),
-        ("reg", LinearRegression())   # numeric prediction instead of bool
+        ("reg", LinearRegression())
     ])
     pipe.fit(X, y)
-
     return pipe
 
 
 # -------------------------------------------------------
-# Bowler performance models (classification high/low)
+# Bowler performance models (regression)
 # -------------------------------------------------------
 def train_bowler_pipelines(full_data):
     df = full_data.copy()
@@ -84,9 +96,9 @@ def train_bowler_pipelines(full_data):
     ], remainder="drop")
     runs_pipe = Pipeline([
         ("pre", pre_r),
-        ("clf", LogisticRegression(solver="liblinear"))
+        ("reg", LinearRegression())
     ])
-    runs_pipe.fit(Xr, yr > yr.median())
+    runs_pipe.fit(Xr, yr)
 
     # Wickets model
     Xw, yw = bowl_wkts[["bowler"]], bowl_wkts["avg_wickets"]
@@ -95,20 +107,19 @@ def train_bowler_pipelines(full_data):
     ], remainder="drop")
     wkts_pipe = Pipeline([
         ("pre", pre_w),
-        ("clf", LogisticRegression(solver="liblinear"))
+        ("reg", LinearRegression())
     ])
-    wkts_pipe.fit(Xw, yw > yw.median())
+    wkts_pipe.fit(Xw, yw)
 
     return runs_pipe, wkts_pipe
 
 
 # -------------------------------------------------------
-# Win prediction model
+# Win prediction model (classification)
 # -------------------------------------------------------
 def train_win_pipeline(full_data):
     df = full_data.copy()
 
-    # Compute target as (first-innings total + 1)
     targets = (
         df[df['inning'] == 1]
         .groupby('match_id')['total_runs']
@@ -116,18 +127,14 @@ def train_win_pipeline(full_data):
         .rename('target_runs')
         .reset_index()
     )
-    targets['target_runs'] = targets['target_runs'] + 1
+    targets['target_runs'] += 1
 
-    # Merge target onto all deliveries
     df = df.merge(targets, on='match_id', how='left')
-
-    # Only 2nd innings with valid targets
     df = df[(df['inning'] == 2) & (df['target_runs'].notna())].copy()
 
     if df.empty:
-        raise ValueError("No valid 2nd-innings data with targets found. Check your CSVs.")
+        raise ValueError("No valid 2nd-innings data with targets found.")
 
-    # Sort and engineer features
     df = df.sort_values(['match_id', 'over', 'ball'])
     df['current_score'] = df.groupby('match_id')['total_runs'].cumsum()
     df['runs_left'] = df['target_runs'] - df['current_score']
@@ -135,8 +142,6 @@ def train_win_pipeline(full_data):
     df['wickets_left'] = 10 - df.groupby('match_id')['is_wicket'].cumsum()
 
     df = df[df['balls_left'] >= 0]
-
-    # Label: did chasing side win?
     df['result'] = (df['batting_team'] == df['winner']).astype(int)
 
     final_df = df[[
@@ -145,7 +150,7 @@ def train_win_pipeline(full_data):
     ]].dropna()
 
     if final_df.empty:
-        raise ValueError("After cleaning, no rows left for training win prediction.")
+        raise ValueError("After cleaning, no rows left for win prediction.")
 
     X = final_df.drop('result', axis=1)
     y = final_df['result']
@@ -155,8 +160,7 @@ def train_win_pipeline(full_data):
             ('enc', OneHotEncoder(sparse_output=False, handle_unknown="ignore"),
              ['batting_team', 'bowling_team', 'city'])
         ], remainder='passthrough')),
-        ('clf', LogisticRegression(solver='liblinear', max_iter=200))
+        ('clf', LinearRegression())  # keep regression probability-like
     ])
     pipe.fit(X, y)
-
     return pipe
