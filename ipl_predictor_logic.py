@@ -1,227 +1,366 @@
 # ipl_predictor_logic.py
+"""
+Backend logic for IPL predictor:
+- load_raw_data(): load and merge matches & deliveries
+- build_player_innings_tables(): create per-innings records for batsmen and bowlers (with context)
+- train_models(): trains and saves models (batsman_runs, bowler_wickets, bowler_econ, win_model)
+- helper prediction functions for app.py
+"""
 import pandas as pd
 import numpy as np
+import joblib
+from pathlib import Path
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_squared_error, accuracy_score
 
+MODEL_DIR = Path("./models")
+MODEL_DIR.mkdir(exist_ok=True)
+
+##### -------------------------
+##### Data loading & feature engineering
+##### -------------------------
 def load_raw_data(matches_path="matches.csv", deliveries_path="deliveries.csv"):
-    """
-    Load and merge matches + deliveries data and normalize column names.
-    Returns merged deliveries dataframe with match-level fields (city, venue, winner).
-    """
-    matches = pd.read_csv(matches_path)
-    deliveries = pd.read_csv(deliveries_path)
+    matches = pd.read_csv(matches_path, parse_dates=True, low_memory=False)
+    deliveries = pd.read_csv(deliveries_path, low_memory=False)
 
-    # Normalize keys if needed
+    # Normalize
     if "id" in matches.columns:
         matches = matches.rename(columns={"id": "match_id"})
     if "batter" in deliveries.columns and "batsman" not in deliveries.columns:
         deliveries = deliveries.rename(columns={"batter": "batsman"})
 
-    # Merge a few useful match-level fields into deliveries
-    full_data = deliveries.merge(
-        matches[["match_id", "city", "venue", "winner"]],
-        on="match_id",
-        how="left"
-    )
+    # Merge basic match info into deliveries
+    if {"match_id", "city", "venue", "winner", "team1", "team2", "date"}.issubset(matches.columns):
+        matches_subset = matches[["match_id", "city", "venue", "winner", "team1", "team2", "date"]]
+    else:
+        # fallback: take whatever columns exist
+        subset_cols = [c for c in ["match_id", "city", "venue", "winner", "team1", "team2", "date"] if c in matches.columns]
+        matches_subset = matches[subset_cols]
 
-    return full_data
+    full = deliveries.merge(matches_subset, on="match_id", how="left")
+    # Ensure over and ball numeric
+    if 'over' in full.columns:
+        full['over'] = pd.to_numeric(full['over'], errors='coerce').fillna(0).astype(int)
+    if 'ball' in full.columns:
+        full['ball'] = pd.to_numeric(full['ball'], errors='coerce').fillna(0).astype(int)
+    return full
 
-
-def get_ui_and_role_data(full_data):
+def build_player_innings_tables(full):
     """
-    Return lists for teams, venues, cities, players and a simple player role map.
-    Roles: 'Batsman', 'Bowler', 'All-Rounder', 'Unknown'
+    Build:
+      - batsman_innings: each row is a batsman's performance in one innings (match_id + batting_team + runs)
+      - bowler_innings: each row is a bowler's performance in one innings (wickets + runs_conceded)
+    Also compute 'opponent' and include venue & innings number and match date (if available)
     """
-    teams = sorted(full_data["batting_team"].dropna().unique().tolist())
-    venues = sorted(full_data["venue"].dropna().unique().tolist())
-    cities = sorted(full_data["city"].dropna().unique().tolist())
-    players = sorted(full_data["batsman"].dropna().unique().tolist())
+    # ensure required columns
+    required = ['match_id', 'inning', 'batting_team', 'bowling_team', 'batsman', 'bowler', 'batsman_runs', 'total_runs', 'is_wicket', 'venue']
+    for c in required:
+        if c not in full.columns:
+            raise ValueError(f"Required column '{c}' missing from deliveries data.")
 
-    # Derive simple roles based on aggregates
-    # If columns are missing, handle gracefully
-    bat_counts = pd.Series(dtype=float)
-    bowl_counts = pd.Series(dtype=float)
-    if "batsman_runs" in full_data.columns:
-        bat_counts = full_data.groupby("batsman")["batsman_runs"].sum()
-    if "bowler" in full_data.columns and "is_wicket" in full_data.columns:
-        bowl_counts = full_data.groupby("bowler")["is_wicket"].sum()
+    # Convert date if present in merged match info
+    if 'date' in full.columns:
+        try:
+            full['match_date'] = pd.to_datetime(full['date'])
+        except Exception:
+            full['match_date'] = pd.NaT
+    else:
+        full['match_date'] = pd.NaT
 
-    player_roles = {}
-    for p in players:
-        bat_score = float(bat_counts.get(p, 0))
-        bowl_score = float(bowl_counts.get(p, 0))
-        if bat_score > 500 and bowl_score > 50:
-            player_roles[p] = "All-Rounder"
-        elif bat_score > 500:
-            player_roles[p] = "Batsman"
-        elif bowl_score > 50:
-            player_roles[p] = "Bowler"
-        else:
-            player_roles[p] = "Unknown"
-
-    return {
-        "teams": teams,
-        "venues": venues,
-        "cities": cities,
-        "players": players,
-        "player_roles": player_roles,
-    }
-
-
-# ------------------------
-# Batsman performance model
-# ------------------------
-def train_batsman_pipeline(full_data):
-    """
-    Trains a simple regression model that predicts average runs per batsman.
-    This model uses only the 'batsman' categorical feature.
-    """
-    if "batsman" not in full_data.columns or "batsman_runs" not in full_data.columns:
-        raise ValueError("Required columns for batsman model missing in data.")
-
-    df = full_data.groupby("batsman")["batsman_runs"].mean().reset_index(name="avg_runs")
-    X = df[["batsman"]]
-    y = df["avg_runs"]
-
-    pre = ColumnTransformer([
-        ("enc", OneHotEncoder(sparse_output=False, handle_unknown="ignore"), ["batsman"])
-    ], remainder="drop")
-
-    pipe = Pipeline([
-        ("pre", pre),
-        ("reg", LinearRegression())
-    ])
-    pipe.fit(X, y)
-    return pipe
-
-
-# ------------------------
-# Bowler performance models
-# ------------------------
-def train_bowler_pipelines(full_data):
-    """
-    Trains two models for bowlers:
-      - average runs conceded per delivery (regression)
-      - average wicket rate per delivery (regression)
-    Both use the 'bowler' categorical feature only.
-    """
-    if "bowler" not in full_data.columns or "total_runs" not in full_data.columns or "is_wicket" not in full_data.columns:
-        raise ValueError("Required columns for bowler models missing in data.")
-
-    bowl_runs = full_data.groupby("bowler")["total_runs"].mean().reset_index(name="avg_runs")
-    bowl_wkts = full_data.groupby("bowler")["is_wicket"].mean().reset_index(name="avg_wickets")
-
-    # Runs model
-    Xr, yr = bowl_runs[["bowler"]], bowl_runs["avg_runs"]
-    pre_r = ColumnTransformer([
-        ("enc", OneHotEncoder(sparse_output=False, handle_unknown="ignore"), ["bowler"])
-    ], remainder="drop")
-    runs_pipe = Pipeline([
-        ("pre", pre_r),
-        ("reg", LinearRegression())
-    ])
-    runs_pipe.fit(Xr, yr)
-
-    # Wickets model (wicket rate per delivery)
-    Xw, yw = bowl_wkts[["bowler"]], bowl_wkts["avg_wickets"]
-    pre_w = ColumnTransformer([
-        ("enc", OneHotEncoder(sparse_output=False, handle_unknown="ignore"), ["bowler"])
-    ], remainder="drop")
-    wkts_pipe = Pipeline([
-        ("pre", pre_w),
-        ("reg", LinearRegression())
-    ])
-    wkts_pipe.fit(Xw, yw)
-
-    return runs_pipe, wkts_pipe
-
-
-# ------------------------
-# Win prediction model
-# ------------------------
-def train_win_pipeline(full_data):
-    """
-    Trains a logistic regression model to predict the probability that the batting team
-    wins in the 2nd innings given match state.
-    Features used: batting_team, bowling_team, city, venue, runs_left, balls_left, wickets_left, target_runs
-    Important: for deliveries, `over` and `ball` typically have `ball` in 1..6; we convert to balls bowled accordingly.
-    """
-    df = full_data.copy()
-
-    # Build target: sum of first-innings runs per match -> target_runs (+1 to chase)
-    targets = (
-        df[df['inning'] == 1]
-        .groupby('match_id')['total_runs']
-        .sum()
-        .rename('target_runs')
+    # Batsman innings-level aggregation
+    batsman_innings = (
+        full
+        .groupby(['match_id', 'inning', 'batting_team', 'batsman', 'venue', 'match_date'], dropna=False)
+        .agg(runs_scored=('batsman_runs', 'sum'),
+             balls_faced=('ball', 'count'))  # approximate balls faced using number of deliveries where he batted
         .reset_index()
     )
-    # target to win is one more run than first innings total
-    targets['target_runs'] = targets['target_runs'] + 1
 
-    # Merge target back and focus on 2nd innings rows only
-    df = df.merge(targets, on='match_id', how='left')
-    df = df[(df['inning'] == 2) & (df['target_runs'].notna())].copy()
+    # Add opponent team (team not batting in that innings)
+    # To get opponent, find unique teams in match (team1/team2 from matches could be used). We'll use bowling_team from deliveries
+    # For a batsman innings, opponent is the bowling_team mode for that match+inning
+    opponent_series = (
+        full.groupby(['match_id', 'inning'])['bowling_team']
+        .agg(lambda s: s.mode().iat[0] if not s.mode().empty else (s.iloc[0] if len(s)>0 else None))
+        .reset_index()
+    ).rename(columns={'bowling_team': 'opponent_team'})
 
-    if df.empty:
-        raise ValueError("No valid 2nd-innings data with targets found.")
+    batsman_innings = batsman_innings.merge(opponent_series, on=['match_id', 'inning'], how='left')
 
-    # Sort to accumulate current score and wickets
-    df = df.sort_values(['match_id', 'over', 'ball'])
+    # Bowler innings-level aggregation
+    bowler_innings = (
+        full
+        .groupby(['match_id', 'inning', 'bowling_team', 'bowler', 'venue', 'match_date'], dropna=False)
+        .agg(runs_conceded=('total_runs', 'sum'),
+             wickets=('is_wicket', 'sum'),
+             balls_bowled=('ball', 'count'))
+        .reset_index()
+    )
+    # Opponent for bowler (batting_team mode)
+    opponent_b = (
+        full.groupby(['match_id', 'inning'])['batting_team']
+        .agg(lambda s: s.mode().iat[0] if not s.mode().empty else (s.iloc[0] if len(s)>0 else None))
+        .reset_index()
+    ).rename(columns={'batting_team': 'opponent_team'})
 
-    # Calculate cumulative current score per match (total_runs is per delivery)
-    df['current_score'] = df.groupby('match_id')['total_runs'].cumsum()
+    bowler_innings = bowler_innings.merge(opponent_b, on=['match_id', 'inning'], how='left')
 
-    # Runs left to chase
-    df['runs_left'] = df['target_runs'] - df['current_score']
+    # Add derived features
+    batsman_innings['strike_rate'] = (batsman_innings['runs_scored'] / batsman_innings['balls_faced']).replace([np.inf, -np.inf], 0).fillna(0) * 100
+    bowler_innings['econ'] = (bowler_innings['runs_conceded'] / bowler_innings['balls_bowled']).replace([np.inf, -np.inf], 0).fillna(0) * 6
 
-    # Important: deliveries commonly index overs starting at 1 and ball in 1..6.
-    # Total balls bowled in match so far = (over - 1) * 6 + ball
-    df['balls_bowled'] = (df['over'].fillna(0).astype(int) - 1) * 6 + df['ball'].fillna(0).astype(int)
+    # Order by date if available for later form calculation
+    batsman_innings = batsman_innings.sort_values(['match_date', 'match_id']).reset_index(drop=True)
+    bowler_innings = bowler_innings.sort_values(['match_date', 'match_id']).reset_index(drop=True)
 
-    # For safety, if negative due to weird rows, clip
-    df['balls_bowled'] = df['balls_bowled'].clip(lower=0)
+    return batsman_innings, bowler_innings
 
-    # IPL T20 total balls = 120
-    df['balls_left'] = 120 - df['balls_bowled']
+def add_recent_form(df, player_col, target_col, group_cols=None, window=5):
+    """
+    Add a rolling recent-form column (mean of last `window` target_col values for the player).
+    The function returns a new dataframe with column 'recent_form' (player recent mean).
+    """
+    df = df.copy()
+    df['recent_form'] = 0.0
+    # Use match_date ordering if exists
+    order_cols = []
+    if 'match_date' in df.columns:
+        order_cols = ['match_date', 'match_id']
+    else:
+        order_cols = ['match_id']
 
-    # Wickets left = 10 - cumulative wickets (clip at 0)
-    df['wickets_fallen'] = df.groupby('match_id')['is_wicket'].cumsum().fillna(0)
-    df['wickets_left'] = (10 - df['wickets_fallen']).clip(lower=0)
+    df = df.sort_values(order_cols)
+    # compute rolling mean per player
+    df['recent_form'] = (
+        df.groupby(player_col)[target_col]
+          .apply(lambda s: s.shift(1).rolling(window=window, min_periods=1).mean().fillna(0))
+          .reset_index(level=0, drop=True)
+    )
+    return df
 
-    # Binary result: 1 if batting team equals match winner
-    df['result'] = (df['batting_team'] == df['winner']).astype(int)
+##### -------------------------
+##### Model training / saving / loading
+##### -------------------------
+def train_and_save_models(matches_path="matches.csv", deliveries_path="deliveries.csv", save_models=True):
+    """
+    Full training pipeline:
+      - loads data
+      - builds batsman_innings & bowler_innings tables
+      - adds recent form features
+      - trains:
+         * batsman_runs_model -> RandomForestRegressor
+         * bowler_wickets_model -> RandomForestRegressor (predict wickets per innings)
+         * bowler_econ_model -> RandomForestRegressor
+         * win_model -> RandomForestClassifier (trained on per-delivery states)
+      - saves models to MODEL_DIR as joblib files
+    Returns dictionary of trained models and label encoders/pipelines.
+    """
+    full = load_raw_data(matches_path, deliveries_path)
+    batsman_innings, bowler_innings = build_player_innings_tables(full)
 
-    # Keep only rows that make sense
-    df = df[df['balls_left'] >= 0]
+    # Add recent form
+    batsman_innings = add_recent_form(batsman_innings, player_col='batsman', target_col='runs_scored', window=5)
+    bowler_innings = add_recent_form(bowler_innings, player_col='bowler', target_col='wickets', window=5)
 
-    feature_cols = [
-        'batting_team', 'bowling_team', 'city', 'venue',
-        'runs_left', 'balls_left', 'wickets_left', 'target_runs'
-    ]
+    # Prepare training sets
+    # Batsman runs per innings model
+    bat_feat_cols = ['batsman', 'venue', 'opponent_team', 'inning', 'recent_form', 'balls_faced']
+    X_bat = batsman_innings[bat_feat_cols].fillna('(missing)')
+    y_bat = batsman_innings['runs_scored'].fillna(0)
 
-    df_features = df[feature_cols + ['result']].dropna()
+    # Bowler wickets per innings (regression for expected wickets)
+    bowl_feat_cols = ['bowler', 'venue', 'opponent_team', 'inning', 'recent_form', 'balls_bowled']
+    X_bowl = bowler_innings[bowl_feat_cols].fillna('(missing)')
+    y_bowl = bowler_innings['wickets'].fillna(0)
 
-    if df_features.empty:
-        raise ValueError("After cleaning, no rows left for win prediction.")
+    # Bowler economy model (runs per over)
+    X_bowl_econ = bowler_innings[bowl_feat_cols].fillna('(missing)')
+    y_bowl_econ = bowler_innings['econ'].fillna(0)
 
-    X = df_features.drop('result', axis=1)
-    y = df_features['result'].astype(int)
+    # Preprocessing Pipeline for players (categorical one-hot + numeric scaler)
+    categorical_cols_bat = ['batsman', 'venue', 'opponent_team']
+    numeric_cols_bat = ['inning', 'recent_form', 'balls_faced']
 
-    # Preprocessor: onehot encode the categorical team/city/venue features; pass numeric through
-    categorical = ['batting_team', 'bowling_team', 'city', 'venue']
-    preprocessor = ColumnTransformer([
-        ("cat", OneHotEncoder(sparse_output=False, handle_unknown="ignore"), categorical)
-    ], remainder="passthrough")  # numeric cols left as passthrough
+    pre_bat = ColumnTransformer([
+        ("cat", OneHotEncoder(sparse_output=False, handle_unknown="ignore"), categorical_cols_bat)
+    ], remainder='passthrough')  # numeric columns passthrough
 
-    # Logistic regression for probability output
-    clf = Pipeline([
-        ('pre', preprocessor),
-        ('clf', LogisticRegression(max_iter=1000))
+    bat_pipeline = Pipeline([
+        ("pre", pre_bat),
+        ("model", RandomForestRegressor(n_estimators=200, n_jobs=-1, random_state=42))
     ])
 
-    clf.fit(X, y)
-    return clf
+    bat_pipeline.fit(X_bat, y_bat)
+
+    # Bowler pipelines
+    categorical_cols_bowl = ['bowler', 'venue', 'opponent_team']
+    pre_bowl = ColumnTransformer([
+        ("cat", OneHotEncoder(sparse_output=False, handle_unknown="ignore"), categorical_cols_bowl)
+    ], remainder='passthrough')
+
+    bowl_wkts_pipeline = Pipeline([
+        ("pre", pre_bowl),
+        ("model", RandomForestRegressor(n_estimators=200, n_jobs=-1, random_state=42))
+    ])
+    bowl_wkts_pipeline.fit(X_bowl, y_bowl)
+
+    bowl_econ_pipeline = Pipeline([
+        ("pre", pre_bowl),
+        ("model", RandomForestRegressor(n_estimators=200, n_jobs=-1, random_state=42))
+    ])
+    bowl_econ_pipeline.fit(X_bowl_econ, y_bowl_econ)
+
+    # -------- Win model: train on ball-by-ball states (like earlier but now using RandomForestClassifier)
+    # Build per-delivery states for innings 2 as we did previously
+    # Steps: use deliveries rows for inning 2, compute cumulative runs, balls left, wickets left, target
+    dd = full.copy()
+    # compute first innings totals
+    targets = (
+        dd[dd['inning'] == 1]
+        .groupby('match_id')['total_runs']
+        .sum()
+        .reset_index()
+        .rename(columns={'total_runs': 'target_runs'})
+    )
+    targets['target_runs'] = targets['target_runs'] + 1
+    dd = dd.merge(targets, on='match_id', how='left')
+    dd = dd[(dd['inning'] == 2) & (dd['target_runs'].notna())].copy()
+    if dd.empty:
+        raise ValueError("No second-innings delivery rows found to train win model.")
+
+    dd = dd.sort_values(['match_id', 'over', 'ball'])
+    dd['current_score'] = dd.groupby('match_id')['total_runs'].cumsum()
+    dd['runs_left'] = dd['target_runs'] - dd['current_score']
+    # calculate balls bowled using (over-1)*6 + ball
+    dd['balls_bowled'] = (dd['over'].fillna(0).astype(int) - 1) * 6 + dd['ball'].fillna(0).astype(int)
+    dd['balls_bowled'] = dd['balls_bowled'].clip(lower=0)
+    dd['balls_left'] = 120 - dd['balls_bowled']
+    dd['wickets_fallen'] = dd.groupby('match_id')['is_wicket'].cumsum().fillna(0)
+    dd['wickets_left'] = (10 - dd['wickets_fallen']).clip(lower=0)
+    dd['result'] = (dd['batting_team'] == dd['winner']).astype(int)
+
+    # features and target
+    win_feat_cols = ['batting_team', 'bowling_team', 'city', 'venue', 'runs_left', 'balls_left', 'wickets_left', 'target_runs']
+    win_df = dd[win_feat_cols + ['result']].dropna()
+    X_win = win_df[win_feat_cols]
+    y_win = win_df['result']
+
+    # Preprocessor for win model
+    cat_win = ['batting_team', 'bowling_team', 'city', 'venue']
+    pre_win = ColumnTransformer([
+        ("cat", OneHotEncoder(sparse_output=False, handle_unknown="ignore"), cat_win)
+    ], remainder='passthrough')
+
+    win_pipeline = Pipeline([
+        ("pre", pre_win),
+        ("clf", RandomForestClassifier(n_estimators=200, n_jobs=-1, random_state=42))
+    ])
+    win_pipeline.fit(X_win, y_win)
+
+    # Evaluate quick metrics (not exhaustive)
+    def eval_reg(pipe, X, y, name):
+        preds = pipe.predict(X)
+        rmse = mean_squared_error(y, preds, squared=False)
+        r2 = r2_score(y, preds)
+        print(f"{name} RMSE: {rmse:.4f}, R2: {r2:.4f}")
+    def eval_clf(pipe, X, y, name):
+        preds = pipe.predict(X)
+        acc = accuracy_score(y, preds)
+        print(f"{name} Accuracy (on training data): {acc:.4f}")
+
+    eval_reg(bat_pipeline, X_bat, y_bat, "Batsman runs")
+    eval_reg(bowl_wkts_pipeline, X_bowl, y_bowl, "Bowler wickets")
+    eval_reg(bowl_econ_pipeline, X_bowl_econ, y_bowl_econ, "Bowler econ")
+    eval_clf(win_pipeline, X_win, y_win, "Win model")
+
+    models = {
+        "bat_pipeline": bat_pipeline,
+        "bowl_wkts_pipeline": bowl_wkts_pipeline,
+        "bowl_econ_pipeline": bowl_econ_pipeline,
+        "win_pipeline": win_pipeline
+    }
+
+    if save_models:
+        joblib.dump(bat_pipeline, MODEL_DIR / "bat_pipeline.joblib")
+        joblib.dump(bowl_wkts_pipeline, MODEL_DIR / "bowl_wkts_pipeline.joblib")
+        joblib.dump(bowl_econ_pipeline, MODEL_DIR / "bowl_econ_pipeline.joblib")
+        joblib.dump(win_pipeline, MODEL_DIR / "win_pipeline.joblib")
+        print(f"Saved models to {MODEL_DIR}")
+
+    return models
+
+##### -------------------------
+##### Prediction helpers (used by Streamlit app)
+##### -------------------------
+def load_models_from_disk():
+    paths = {
+        "bat_pipeline": MODEL_DIR / "bat_pipeline.joblib",
+        "bowl_wkts_pipeline": MODEL_DIR / "bowl_wkts_pipeline.joblib",
+        "bowl_econ_pipeline": MODEL_DIR / "bowl_econ_pipeline.joblib",
+        "win_pipeline": MODEL_DIR / "win_pipeline.joblib"
+    }
+    missing = [p for p in paths.values() if not p.exists()]
+    if missing:
+        raise FileNotFoundError(f"Model files missing: {missing}. Run train_and_save_models() first.")
+
+    return {k: joblib.load(v) for k, v in paths.items()}
+
+def predict_batsman_runs(bat_pipeline, batsman, venue, opponent, inning=1, recent_form=0.0, balls_faced=30):
+    x = pd.DataFrame([{
+        'batsman': batsman,
+        'venue': venue if venue is not None else '(missing)',
+        'opponent_team': opponent if opponent is not None else '(missing)',
+        'inning': inning,
+        'recent_form': recent_form,
+        'balls_faced': balls_faced
+    }])
+    pred = bat_pipeline.predict(x)[0]
+    return float(max(0.0, pred))
+
+def predict_bowler_wickets(bowl_wkts_pipeline, bowler, venue, opponent, inning=1, recent_form=0.0, balls_bowled=4*6):
+    x = pd.DataFrame([{
+        'bowler': bowler,
+        'venue': venue if venue is not None else '(missing)',
+        'opponent_team': opponent if opponent is not None else '(missing)',
+        'inning': inning,
+        'recent_form': recent_form,
+        'balls_bowled': balls_bowled
+    }])
+    return float(max(0.0, bowl_wkts_pipeline.predict(x)[0]))
+
+def predict_bowler_econ(bowl_econ_pipeline, bowler, venue, opponent, inning=1, recent_form=0.0, balls_bowled=4*6):
+    x = pd.DataFrame([{
+        'bowler': bowler,
+        'venue': venue if venue is not None else '(missing)',
+        'opponent_team': opponent if opponent is not None else '(missing)',
+        'inning': inning,
+        'recent_form': recent_form,
+        'balls_bowled': balls_bowled
+    }])
+    return float(max(0.0, bowl_econ_pipeline.predict(x)[0]))
+
+def predict_win_probability(win_pipeline, batting_team, bowling_team, city, venue, runs_left, balls_left, wickets_left, target_runs):
+    x = pd.DataFrame([{
+        'batting_team': batting_team,
+        'bowling_team': bowling_team,
+        'city': city,
+        'venue': venue,
+        'runs_left': runs_left,
+        'balls_left': balls_left,
+        'wickets_left': wickets_left,
+        'target_runs': target_runs
+    }])
+    # RandomForestClassifier -> predict_proba
+    proba = win_pipeline.predict_proba(x)[0]
+    # class 1 corresponds to batting-team-wins if training was done that way
+    # get probability of class 1
+    if win_pipeline.classes_.tolist().index(1) >= 0:
+        idx = list(win_pipeline.classes_).index(1)
+    else:
+        # fallback
+        idx = 1 if len(proba) > 1 else 0
+    return float(proba[idx])

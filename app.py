@@ -1,174 +1,166 @@
 # app.py
 import streamlit as st
 import pandas as pd
-# Import backend logic
+from pathlib import Path
+import joblib
+
 from ipl_predictor_logic import (
     load_raw_data,
     get_ui_and_role_data,
-    train_batsman_pipeline,
-    train_bowler_pipelines,
-    train_win_pipeline
+    train_and_save_models,
+    load_models_from_disk,
+    predict_batsman_runs,
+    predict_bowler_wickets,
+    predict_bowler_econ,
+    predict_win_probability,
+    build_player_innings_tables
 )
 
-st.set_page_config(layout="wide", page_title="IPL Predictor")
+st.set_page_config(layout="wide", page_title="IPL Predictor (Contextual)")
 
-@st.cache_data(ttl=60*60*6)  # cache models for 6 hours by default
-def load_and_train_models():
-    """Load data and train all models (cached for speed)."""
-    raw_data = load_raw_data()
-    ui_data = get_ui_and_role_data(raw_data)
-    batsman_pipe = train_batsman_pipeline(raw_data)
-    bowler_runs_pipe, bowler_wickets_pipe = train_bowler_pipelines(raw_data)
-    win_pipe = train_win_pipeline(raw_data)
-    return ui_data, batsman_pipe, bowler_runs_pipe, bowler_wickets_pipe, win_pipe
+# --- Setup / load data & models (cached) ---
+@st.cache_data(ttl=60*60*6)
+def initialize(matches_path="matches.csv", deliveries_path="deliveries.csv"):
+    full = load_raw_data(matches_path, deliveries_path)
+    batsman_innings, bowler_innings = build_player_innings_tables(full)
+    # Prepare UI lists
+    teams = sorted(full['batting_team'].dropna().unique().tolist())
+    venues = sorted(full['venue'].dropna().unique().tolist())
+    cities = sorted(full['city'].dropna().unique().tolist())
+    players = sorted(full['batsman'].dropna().unique().tolist())
+    bowlers = sorted(full['bowler'].dropna().unique().tolist())
+    # Attempt to load models; if missing, train
+    model_dir = Path("./models")
+    try:
+        models = load_models_from_disk()
+    except Exception:
+        st.info("Training models for the first time. This may take several minutes depending on dataset size.")
+        models = train_and_save_models(matches_path, deliveries_path, save_models=True)
+    return full, teams, venues, cities, players, bowlers, models
 
-# --- Load Models and UI Data ---
 try:
-    with st.spinner('Setting up the app (loading data and training models)...'):
-        ui_data, batsman_pipe, bowler_runs_pipe, bowler_wickets_pipe, win_pipe = load_and_train_models()
-
-    teams = ui_data['teams']
-    venues = ui_data['venues']
-    cities = ui_data['cities']
-    players = ui_data['players']
-    player_roles = ui_data['player_roles']
-
+    full, teams, venues, cities, players, bowlers, models = initialize()
 except FileNotFoundError as e:
-    st.error(f"ERROR: Data file not found. {e}")
-    st.info("Please ensure 'matches.csv' and 'deliveries.csv' are in the same folder as this app.")
+    st.error(f"Data files missing: {e}")
     st.stop()
 except Exception as e:
-    st.error(f"Failed to initialize app: {e}")
+    st.error(f"Initialization error: {e}")
     st.stop()
 
+bat_pipeline = models['bat_pipeline']
+bowl_wkts_pipeline = models['bowl_wkts_pipeline']
+bowl_econ_pipeline = models['bowl_econ_pipeline']
+win_pipeline = models['win_pipeline']
 
-# --- Main App Layout ---
-st.title('🏏 IPL Performance and Win Predictor')
-st.markdown("---")
+# --- App UI ---
+st.title("🏏 IPL Contextual Predictor")
+st.markdown("Use venue + opponent + recent form to get contextual predictions for players and a live win probability estimate.")
 
-app_mode = st.sidebar.selectbox('Choose Prediction Type',
-    ['Player Performance Prediction', 'Match Win Prediction'])
+mode = st.sidebar.radio("Choose", ["Player Prediction", "Match Win Prediction"])
 
-
-# =========================================================
-# Player Performance Prediction
-# =========================================================
-if app_mode == 'Player Performance Prediction':
-    st.header('🔮 Player Performance Prediction')
-
+# ---------------------------
+# Player Prediction
+# ---------------------------
+if mode == "Player Prediction":
+    st.header("Player Performance Prediction (contextual)")
     col1, col2, col3 = st.columns(3)
     with col1:
-        selected_player = st.selectbox('Select a Player', players)
+        player = st.selectbox("Player (batsman or bowler)", players)
     with col2:
-        opponent_team = st.selectbox('Select Opponent Team', ['(not used by model)'] + teams)
+        role_guess = st.selectbox("Role guess (if bowler select bowler name):", ["Batsman", "Bowler", "All-Rounder"])
     with col3:
-        venue = st.selectbox('Select Venue', ['(not used by model)'] + venues)
+        opponent = st.selectbox("Opponent Team", ["(missing)"] + teams)
 
-    if st.button('Predict Player Performance'):
-        role = player_roles.get(selected_player, 'Unknown')
-        st.subheader(f'Prediction for {selected_player} ({role})')
+    venue = st.selectbox("Venue", ["(missing)"] + venues)
+    inning = st.selectbox("Innings", [1, 2])
+    recent_form = st.number_input("Recent form (avg runs or wickets last few matches) - leave 0 to auto", value=0.0, step=0.1)
+    balls = st.number_input("Expected balls (batsman balls faced or bowler balls to bowl)", value=30)
 
-        # Batsman predictions
-        if role in ['Batsman', 'All-Rounder']:
-            input_df_bat = pd.DataFrame({'batsman': [selected_player]})
+    if st.button("Predict"):
+        # If recent_form not provided, we try to compute from historical table (best-effort)
+        if recent_form == 0.0:
+            # try compute batsman's recent average runs from built innings table if present
             try:
-                predicted_runs = batsman_pipe.predict(input_df_bat)[0]
-                st.metric(label="Predicted Runs", value=f"~ {predicted_runs:.1f} runs")
-            except Exception as e:
-                st.error(f"Could not predict batsman runs: {e}")
+                batsman_innings, _ = build_player_innings_tables(full)
+                r = batsman_innings[batsman_innings['batsman'] == player]['runs_scored'].tail(5).mean()
+                recent_form = float(r) if not pd.isna(r) else 0.0
+            except Exception:
+                recent_form = 0.0
 
-        # Bowler predictions
-        if role in ['Bowler', 'All-Rounder']:
-            input_df_bowl = pd.DataFrame({'bowler': [selected_player]})
-            try:
-                predicted_runs = bowler_runs_pipe.predict(input_df_bowl)[0]
-                predicted_wickets = bowler_wickets_pipe.predict(input_df_bowl)[0]
-                st.metric(label="Predicted Wickets", value=f"~ {predicted_wickets:.2f}")
-                st.metric(label="Predicted Runs Conceded (per delivery avg)", value=f"~ {predicted_runs:.2f}")
-            except Exception as e:
-                st.error(f"Could not predict bowler stats: {e}")
+        st.subheader(f"Predictions for {player} ({role_guess}) vs {opponent} at {venue}")
+        # Batsman prediction
+        try:
+            predicted_runs = predict_batsman_runs(bat_pipeline, batsman=player, venue=venue, opponent=opponent, inning=inning, recent_form=recent_form, balls_faced=balls)
+            st.metric("Predicted Runs (per innings)", f"{predicted_runs:.1f}")
+        except Exception as e:
+            st.error(f"Batsman prediction failed: {e}")
 
-        if role == 'Unknown':
-            st.warning("Player has limited historical data for a defined role. Predictions may be less accurate.")
+        # Bowler predictions (if player also bowler)
+        try:
+            predicted_wkts = predict_bowler_wickets(bowl_wkts_pipeline, bowler=player, venue=venue, opponent=opponent, inning=inning, recent_form=recent_form, balls_bowled=balls)
+            predicted_econ = predict_bowler_econ(bowl_econ_pipeline, bowler=player, venue=venue, opponent=opponent, inning=inning, recent_form=recent_form, balls_bowled=balls)
+            st.metric("Predicted Wickets (per innings)", f"{predicted_wkts:.2f}")
+            st.metric("Predicted Economy (runs per over)", f"{predicted_econ:.2f}")
+        except Exception as e:
+            st.info("Bowler predictions unavailable or failed (player may not be a bowler in the dataset).")
 
-        st.caption("Note: Current player models are simple and use player name only. To include opponent/venue context you'd need to retrain models with those features.")
+        st.caption("Note: predictions are contextual — they use venue, opponent, inning and recent form. You can improve results by providing correct recent form or more refined historical data.")
 
-
-# =========================================================
+# ---------------------------
 # Match Win Prediction
-# =========================================================
-elif app_mode == 'Match Win Prediction':
-    st.header('📊 Live Match Win Probability (2nd Innings)')
-
+# ---------------------------
+else:
+    st.header("Live Match Win Probability (2nd Innings)")
     col1, col2, col3 = st.columns(3)
     with col1:
-        batting_team = st.selectbox('Batting Team', teams, key='batting')
+        batting_team = st.selectbox("Batting Team", teams)
     with col2:
-        bowling_team = st.selectbox('Bowling Team', [t for t in teams if t != batting_team], key='bowling')
+        bowling_team = st.selectbox("Bowling Team", [t for t in teams if t != batting_team])
     with col3:
-        city = st.selectbox('Host City', cities)
+        city = st.selectbox("Host City", ["(missing)"] + cities)
 
-    target = st.number_input('Target Score', min_value=1, step=1, value=180)
+    venue = st.selectbox("Venue", ["(missing)"] + venues)
+    target = st.number_input("Target Score", min_value=1, value=180)
+    score = st.number_input("Current Score", min_value=0, value=50)
+    overs = st.text_input("Overs completed (format O.B e.g., 8.3)", value="8.3")
+    wickets_down = st.number_input("Wickets Down", min_value=0, max_value=10, value=2)
 
-    col4, col5, col6 = st.columns(3)
-    with col4:
-        score = st.number_input('Current Score', min_value=0, step=1, value=50)
-    with col5:
-        overs = st.number_input('Overs Completed (format: O.B e.g., 8.3)', min_value=0.0, max_value=19.5, step=0.1, format="%.1f")
-    with col6:
-        wickets = st.number_input('Wickets Down', min_value=0, max_value=10, step=1)
-
-    venue = st.selectbox('Venue', venues)
-
-    if st.button('Predict Win Probability'):
-        if batting_team == bowling_team:
-            st.error("Batting and Bowling teams must be different.")
-        else:
-            # parse overs input (e.g., 8.3 -> 8 overs and 3 balls)
-            completed_overs = int(overs)
-            balls_in_current_over = int(round((overs - completed_overs) * 10))
-            if balls_in_current_over >= 6:
-                st.warning("Ball part of overs should be 0..5 (e.g., 8.3 means 8 overs + 3 balls). Adjusting to 5 max.")
-                balls_in_current_over = min(balls_in_current_over, 5)
-
-            total_balls_bowled = completed_overs * 6 + balls_in_current_over
-            balls_left = 120 - total_balls_bowled
-            runs_left = target - score
-            wickets_left = 10 - wickets
-
-            # Edge cases
-            if runs_left <= 0:
-                st.success(f"{batting_team} has a 100% win probability (target already reached).")
-            elif balls_left <= 0 or wickets_left <= 0:
-                st.error(f"{batting_team} has a 0% win probability (no balls or no wickets left).")
+    if st.button("Predict Win Probability"):
+        # parse overs text
+        try:
+            if "." in overs:
+                parts = overs.split(".")
+                o = int(parts[0])
+                b = int(parts[1])
             else:
-                input_df = pd.DataFrame({
-                    'batting_team': [batting_team],
-                    'bowling_team': [bowling_team],
-                    'city': [city],
-                    'venue': [venue],
-                    'runs_left': [runs_left],
-                    'balls_left': [balls_left],
-                    'wickets_left': [wickets_left],
-                    'target_runs': [target]
-                })
+                o = int(float(overs))
+                b = 0
+            if b >= 6:
+                b = 5
+        except Exception:
+            st.error("Invalid overs format. Use e.g., 8.3 meaning 8 overs and 3 balls.")
+            st.stop()
 
-                try:
-                    # win_pipe is a logistic regression pipeline -> use predict_proba to get probability for class 1
-                    probs = win_pipe.predict_proba(input_df)
-                    # class 1 is batting-team-wins
-                    win_prob = float(probs[0][1])
-                    win_prob = max(0.0, min(1.0, win_prob))
-                    loss_prob = 1.0 - win_prob
+        balls_bowled = o * 6 + b
+        balls_left = 120 - balls_bowled
+        runs_left = target - score
+        wickets_left = 10 - wickets_down
 
-                    st.subheader('Prediction Probabilities')
-                    col7, col8 = st.columns(2)
-                    with col7:
-                        st.metric(label=f"{batting_team} Win %", value=f"{win_prob:.0%}")
-                    with col8:
-                        st.metric(label=f"{bowling_team} Win %", value=f"{loss_prob:.0%}")
+        if runs_left <= 0:
+            st.success(f"{batting_team} already reached target — win probability ~100%")
+        elif balls_left <= 0 or wickets_left <= 0:
+            st.error(f"{batting_team} has 0% win probability (no balls or wickets left).")
+        else:
+            try:
+                win_prob = predict_win_probability(win_pipeline, batting_team=batting_team, bowling_team=bowling_team,
+                                                   city=city, venue=venue, runs_left=runs_left, balls_left=balls_left,
+                                                   wickets_left=wickets_left, target_runs=target)
+                win_prob = max(0.0, min(1.0, win_prob))
+                st.metric(f"{batting_team} Win Probability", f"{win_prob:.0%}")
+                st.metric(f"{bowling_team} Win Probability", f"{(1-win_prob):.0%}")
+                st.progress(win_prob)
+            except Exception as e:
+                st.error(f"Win prediction failed: {e}")
 
-                    st.progress(win_prob)
-
-                except Exception as e:
-                    st.error(f"Prediction failed: {e}")
+st.sidebar.markdown("---")
+st.sidebar.markdown("Model & data notes:\n- Models are RandomForest-based and use venue/opponent/recent form.\n- If models missing, the app will train them (may take minutes).")
