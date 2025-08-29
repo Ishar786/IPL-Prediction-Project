@@ -10,10 +10,10 @@ def load_raw_data():
     """Loads, merges, and performs initial cleaning of the raw CSV files."""
     if not os.path.exists('matches.csv') or not os.path.exists('deliveries.csv'):
         raise FileNotFoundError("Ensure 'matches.csv' and 'deliveries.csv' are in the project folder.")
-
+        
     matches = pd.read_csv('matches.csv')
     deliveries = pd.read_csv('deliveries.csv')
-
+    
     # Standardize column names for merging and consistency
     matches.rename(columns={'id': 'match_id'}, inplace=True)
     if 'batter' in deliveries.columns:
@@ -45,11 +45,11 @@ def get_ui_and_role_data(full_data):
             player_roles[player] = 'Bowler'
         else:
             player_roles[player] = 'Unknown'
-
+            
     ui_data = {
-        'teams': sorted(full_data['team1'].unique()),
-        'venues': sorted(full_data['venue'].unique()),
-        'cities': sorted(full_data['city'].dropna().unique()),
+        'teams': sorted([team for team in full_data['team1'].unique() if pd.notna(team)]),
+        'venues': sorted([venue for venue in full_data['venue'].unique() if pd.notna(venue)]),
+        'cities': sorted([city for city in full_data['city'].dropna().unique() if pd.notna(city)]),
         'players': sorted([p for p in all_players if p]), # Filter out any potential None/NaN players
         'player_roles': player_roles
     }
@@ -60,7 +60,7 @@ def train_batsman_pipeline(full_data):
     batsman_df = full_data.groupby(['match_id', 'batsman', 'bowling_team', 'venue'])['batsman_runs'].sum().reset_index()
     X = batsman_df[['batsman', 'bowling_team', 'venue']]
     y = batsman_df['batsman_runs']
-
+    
     pipe = Pipeline(steps=[
         ('preprocessor', ColumnTransformer([('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False), ['batsman', 'bowling_team', 'venue'])])),
         ('regressor', RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1))
@@ -74,9 +74,9 @@ def train_bowler_pipelines(full_data):
         runs_conceded=('total_runs', 'sum'),
         wickets_taken=('is_wicket', 'sum')
     ).reset_index()
-
+    
     X = bowler_df[['bowler', 'batting_team', 'venue']]
-
+    
     # Runs Conceded Pipeline
     y_runs = bowler_df['runs_conceded']
     runs_pipe = Pipeline(steps=[
@@ -84,7 +84,7 @@ def train_bowler_pipelines(full_data):
         ('regressor', RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1))
     ])
     runs_pipe.fit(X, y_runs)
-
+    
     # Wickets Taken Pipeline
     y_wickets = bowler_df['wickets_taken']
     wickets_pipe = Pipeline(steps=[
@@ -92,15 +92,20 @@ def train_bowler_pipelines(full_data):
         ('regressor', RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1))
     ])
     wickets_pipe.fit(X, y_wickets)
-
+    
     return runs_pipe, wickets_pipe
 
 def train_win_pipeline(full_data):
     """Trains and returns the match win prediction pipeline for the 2nd innings."""
     win_df = full_data.copy()
-    match_targets = win_df.groupby('match_id')['total_runs'].sum().rename('target_runs')
-    win_df = win_df.merge(match_targets, on='match_id')
-
+    
+    # Use the 'target_runs' column if it exists, otherwise calculate it.
+    if 'target_runs' not in win_df.columns:
+         first_innings_runs = win_df[win_df['inning'] == 1].groupby('match_id')['total_runs'].sum().reset_index()
+         first_innings_runs.rename(columns={'total_runs': 'target_runs'}, inplace=True)
+         win_df = win_df.merge(first_innings_runs, on='match_id')
+         win_df['target_runs'] = win_df['target_runs'] + 1
+    
     win_df = win_df[win_df['inning'] == 2].copy()
     win_df['current_score'] = win_df.groupby('match_id')['total_runs'].cumsum()
     win_df['runs_left'] = win_df['target_runs'] - win_df['current_score']
@@ -112,7 +117,7 @@ def train_win_pipeline(full_data):
     final_df = win_df[['batting_team', 'bowling_team', 'city', 'runs_left', 'balls_left', 'wickets_left', 'target_runs', 'result']].dropna()
     X = final_df.drop('result', axis=1)
     y = final_df['result']
-
+    
     pipe = Pipeline(steps=[
         ('preprocessor', ColumnTransformer([('encoder', OneHotEncoder(sparse_output=False, handle_unknown='ignore'), ['batting_team', 'bowling_team', 'city'])])),
         ('classifier', LogisticRegression(solver='liblinear'))
