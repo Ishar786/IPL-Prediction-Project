@@ -2,7 +2,8 @@ import pandas as pd
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, LinearRegression
+
 
 # -------------------------------------------------------
 # Load Data
@@ -46,7 +47,7 @@ def get_ui_and_role_data(full_data):
 
 
 # -------------------------------------------------------
-# Batsman performance model
+# Batsman performance model (regression for numeric runs)
 # -------------------------------------------------------
 def train_batsman_pipeline(full_data):
     df = full_data.copy()
@@ -61,15 +62,15 @@ def train_batsman_pipeline(full_data):
 
     pipe = Pipeline([
         ("pre", pre),
-        ("clf", LogisticRegression(solver="liblinear"))
+        ("reg", LinearRegression())   # numeric prediction instead of bool
     ])
-    pipe.fit(X, y > y.median())  # classify above/below median scorer
+    pipe.fit(X, y)
 
     return pipe
 
 
 # -------------------------------------------------------
-# Bowler performance models
+# Bowler performance models (classification high/low)
 # -------------------------------------------------------
 def train_bowler_pipelines(full_data):
     df = full_data.copy()
