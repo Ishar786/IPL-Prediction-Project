@@ -30,8 +30,6 @@ def load_and_train_models():
     return ui_data, batsman_pipe, bowler_runs_pipe, bowler_wickets_pipe, win_pipe
 
 # --- Load Models and UI Data ---
-# This block attempts to load the models from the cache. If it's the first run,
-# it will execute the function above, showing a spinner to the user.
 try:
     with st.spinner('Setting up the app for the first time... This might take a moment.'):
         ui_data, batsman_pipe, bowler_runs_pipe, bowler_wickets_pipe, win_pipe = load_and_train_models()
@@ -46,7 +44,7 @@ try:
 except FileNotFoundError as e:
     st.error(f"ERROR: Data file not found. {e}")
     st.info("Please make sure 'matches.csv' and 'deliveries.csv' are in the same folder as this app.")
-    st.stop() # Halts the app if data is missing
+    st.stop()
 
 
 # --- Main App Layout ---
@@ -59,7 +57,7 @@ app_mode = st.sidebar.selectbox('Choose Prediction Type',
 
 # --- UI for Player Performance Prediction ---
 if app_mode == 'Player Performance Prediction':
-    st.header('🔮 Player Performance Prediction')
+    st.header('Player Performance Prediction')
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -74,22 +72,34 @@ if app_mode == 'Player Performance Prediction':
         st.subheader(f'Prediction for {selected_player} ({role})')
 
         if role in ['Batsman', 'All-Rounder']:
-            input_df_bat = pd.DataFrame({'batsman': [selected_player], 'bowling_team': [opponent_team], 'venue': [venue]})
+            input_df_bat = pd.DataFrame({
+                'batsman': [selected_player],
+                'bowling_team': [opponent_team],
+                'venue': [venue]
+            })
             predicted_score = batsman_pipe.predict(input_df_bat)[0]
+            predicted_score = float(predicted_score)
             st.metric(label="Predicted Score", value=f"~ {int(round(predicted_score))} runs")
 
         if role in ['Bowler', 'All-Rounder']:
-            input_df_bowl = pd.DataFrame({'bowler': [selected_player], 'batting_team': [opponent_team], 'venue': [venue]})
-            predicted_runs = bowler_runs_pipe.predict(input_df_bowl)[0]
-            predicted_wickets = bowler_wickets_pipe.predict(input_df_bowl)[0]
-            st.metric(label="Predicted Bowling Figures", value=f"{int(round(predicted_wickets))} wickets for {int(round(predicted_runs))} runs")
+            input_df_bowl = pd.DataFrame({
+                'bowler': [selected_player],
+                'batting_team': [opponent_team],
+                'venue': [venue]
+            })
+            predicted_runs = float(bowler_runs_pipe.predict(input_df_bowl)[0])    
+            predicted_wickets = float(bowler_wickets_pipe.predict(input_df_bowl)[0])  
+            st.metric(
+                label="Predicted Bowling Figures",
+                value=f"{int(round(predicted_wickets))} wickets for {int(round(predicted_runs))} runs"
+            )
 
         if role == 'Unknown':
             st.warning("Player has limited historical data for a defined role. Predictions are unavailable or may be less accurate.")
 
 # --- UI for Match Win Prediction ---
 elif app_mode == 'Match Win Prediction':
-    st.header('📊 Live Match Win Probability (2nd Innings)')
+    st.header('Live Match Win Probability (2nd Innings)')
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -139,4 +149,3 @@ elif app_mode == 'Match Win Prediction':
                 with col8:
                      st.metric(label=f"{bowling_team} Win %", value=f"{loss_prob:.0%}")
                 st.progress(win_prob)
-
