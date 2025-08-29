@@ -14,11 +14,7 @@ st.set_page_config(layout="wide")
 
 @st.cache_data
 def load_and_train_models():
-    """
-    Loads raw data and trains all necessary models. Streamlit's caching decorator
-    ensures this computationally expensive function runs only ONCE. The results
-    are stored in a memory cache for instant retrieval on subsequent runs.
-    """
+    """Loads raw data and trains all necessary models."""
     print("CACHE MISS: Loading data and training models...")
     raw_data = load_raw_data()
     ui_data = get_ui_and_role_data(raw_data)
@@ -45,7 +41,7 @@ except FileNotFoundError as e:
     st.stop()
 
 # --- Main App Layout ---
-st.title('IPL Performance and Win Predictor')
+st.title('🏏 IPL Performance and Win Predictor')
 st.markdown("---")
 
 # --- Sidebar for App Navigation ---
@@ -54,7 +50,7 @@ app_mode = st.sidebar.selectbox('Choose Prediction Type',
 
 # --- UI for Player Performance Prediction ---
 if app_mode == 'Player Performance Prediction':
-    st.header('Player Performance Prediction')
+    st.header('🔮 Player Performance Prediction')
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -74,9 +70,8 @@ if app_mode == 'Player Performance Prediction':
                 'bowling_team': [opponent_team],
                 'venue': [venue]
             })
-            # probability of being high performer
-            predicted_score = batsman_pipe.predict_proba(input_df_bat)[0][1] * 100
-            st.metric(label="Predicted Batting Form Index", value=f"{predicted_score:.1f}")
+            predicted_score = batsman_pipe.predict(input_df_bat)[0]
+            st.metric(label="Predicted Score", value=f"~ {predicted_score:.1f} runs")
 
         if role in ['Bowler', 'All-Rounder']:
             input_df_bowl = pd.DataFrame({
@@ -84,19 +79,19 @@ if app_mode == 'Player Performance Prediction':
                 'batting_team': [opponent_team],
                 'venue': [venue]
             })
-            predicted_runs = bowler_runs_pipe.predict_proba(input_df_bowl)[0][1] * 100
-            predicted_wickets = bowler_wickets_pipe.predict_proba(input_df_bowl)[0][1] * 5
+            predicted_runs = bowler_runs_pipe.predict(input_df_bowl)[0]
+            predicted_wickets = bowler_wickets_pipe.predict(input_df_bowl)[0]
             st.metric(
                 label="Predicted Bowling Figures",
                 value=f"{predicted_wickets:.1f} wickets for {predicted_runs:.1f} runs"
             )
 
         if role == 'Unknown':
-            st.warning("Player has limited historical data for a defined role. Predictions are unavailable or may be less accurate.")
+            st.warning("Player has limited historical data for a defined role. Predictions may be less accurate.")
 
 # --- UI for Match Win Prediction ---
 elif app_mode == 'Match Win Prediction':
-    st.header('Live Match Win Probability (2nd Innings)')
+    st.header('📊 Live Match Win Probability (2nd Innings)')
 
     col1, col2, col3 = st.columns(3)
     with col1:
