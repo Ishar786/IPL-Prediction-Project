@@ -1,1 +1,16 @@
-scikit-learn==1.7.1
+# Core Python scientific stack
+numpy
+pandas
+scikit-learn
+joblib
+
+# Visualization (optional but useful)
+matplotlib
+seaborn
+
+# Web framework
+streamlit
+
+# Data handling (optional but recommended for IPL data processing)
+openpyxl   # if using Excel files
+
