@@ -99,7 +99,7 @@ def train_win_pipeline(full_data):
     """Trains and returns the match win prediction pipeline for the 2nd innings."""
     win_df = full_data.copy()
 
-    # Calculate target from 1st innings (inning == 1)
+    # Compute target runs from first innings only
     match_targets = (
         win_df[win_df['inning'] == 1]
         .groupby('match_id')['total_runs']
@@ -107,13 +107,16 @@ def train_win_pipeline(full_data):
         .reset_index()
         .rename(columns={'total_runs': 'target_runs'})
     )
-    match_targets['target_runs'] = match_targets['target_runs'] + 1  # target = runs + 1
+    match_targets['target_runs'] += 1  # target = runs + 1
 
-    # Merge target into full data
+    # Merge with left join so we don't lose 2nd innings data
     win_df = win_df.merge(match_targets, on='match_id', how='left')
 
-    # Filter for 2nd innings only
-    win_df = win_df[win_df['inning'] == 2].copy()
+    # Only keep second innings rows that actually have a target
+    win_df = win_df[(win_df['inning'] == 2) & (win_df['target_runs'].notna())].copy()
+
+    if win_df.empty:
+        raise ValueError("No valid 2nd innings data with targets found. Check your CSV files.")
 
     # Features
     win_df['current_score'] = win_df.groupby('match_id')['total_runs'].cumsum()
@@ -122,13 +125,16 @@ def train_win_pipeline(full_data):
     win_df['wickets_left'] = 10 - win_df.groupby('match_id')['is_wicket'].cumsum()
     win_df = win_df[win_df['balls_left'] >= 0]
 
-    # Label: 1 if batting_team == winner, else 0
+    # Label: 1 if batting team won, else 0
     win_df['result'] = (win_df['batting_team'] == win_df['winner']).astype(int)
 
     # Final dataset
-    final_df = win_df[['batting_team', 'bowling_team', 'city', 
-                       'runs_left', 'balls_left', 'wickets_left', 
+    final_df = win_df[['batting_team', 'bowling_team', 'city',
+                       'runs_left', 'balls_left', 'wickets_left',
                        'target_runs', 'result']].dropna()
+
+    if final_df.empty:
+        raise ValueError("After cleaning, no rows left for training win prediction.")
 
     X = final_df.drop('result', axis=1)
     y = final_df['result']
@@ -136,7 +142,7 @@ def train_win_pipeline(full_data):
     # Pipeline
     pipe = Pipeline(steps=[
         ('preprocessor', ColumnTransformer([
-            ('encoder', OneHotEncoder(sparse_output=False, handle_unknown='ignore'), 
+            ('encoder', OneHotEncoder(sparse_output=False, handle_unknown='ignore'),
              ['batting_team', 'bowling_team', 'city'])
         ])),
         ('classifier', LogisticRegression(solver='liblinear'))
