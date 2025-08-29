@@ -19,7 +19,6 @@ def load_and_train_models():
     ensures this computationally expensive function runs only ONCE. The results
     are stored in a memory cache for instant retrieval on subsequent runs.
     """
-    # This print statement will only appear in your terminal on the very first run
     print("CACHE MISS: Loading data and training models...")
     raw_data = load_raw_data()
     ui_data = get_ui_and_role_data(raw_data)
@@ -34,7 +33,6 @@ try:
     with st.spinner('Setting up the app for the first time... This might take a moment.'):
         ui_data, batsman_pipe, bowler_runs_pipe, bowler_wickets_pipe, win_pipe = load_and_train_models()
 
-    # Extract data for populating the UI dropdowns
     teams = ui_data['teams']
     venues = ui_data['venues']
     cities = ui_data['cities']
@@ -46,9 +44,8 @@ except FileNotFoundError as e:
     st.info("Please make sure 'matches.csv' and 'deliveries.csv' are in the same folder as this app.")
     st.stop()
 
-
 # --- Main App Layout ---
-st.title('🏏 IPL Performance and Win Predictor')
+st.title('IPL Performance and Win Predictor')
 st.markdown("---")
 
 # --- Sidebar for App Navigation ---
@@ -77,9 +74,9 @@ if app_mode == 'Player Performance Prediction':
                 'bowling_team': [opponent_team],
                 'venue': [venue]
             })
-            predicted_score = batsman_pipe.predict(input_df_bat)[0]
-            predicted_score = float(predicted_score)
-            st.metric(label="Predicted Score", value=f"~ {int(round(predicted_score))} runs")
+            # probability of being high performer
+            predicted_score = batsman_pipe.predict_proba(input_df_bat)[0][1] * 100
+            st.metric(label="Predicted Batting Form Index", value=f"{predicted_score:.1f}")
 
         if role in ['Bowler', 'All-Rounder']:
             input_df_bowl = pd.DataFrame({
@@ -87,11 +84,11 @@ if app_mode == 'Player Performance Prediction':
                 'batting_team': [opponent_team],
                 'venue': [venue]
             })
-            predicted_runs = float(bowler_runs_pipe.predict(input_df_bowl)[0])    
-            predicted_wickets = float(bowler_wickets_pipe.predict(input_df_bowl)[0])  
+            predicted_runs = bowler_runs_pipe.predict_proba(input_df_bowl)[0][1] * 100
+            predicted_wickets = bowler_wickets_pipe.predict_proba(input_df_bowl)[0][1] * 5
             st.metric(
                 label="Predicted Bowling Figures",
-                value=f"{int(round(predicted_wickets))} wickets for {int(round(predicted_runs))} runs"
+                value=f"{predicted_wickets:.1f} wickets for {predicted_runs:.1f} runs"
             )
 
         if role == 'Unknown':
@@ -127,11 +124,10 @@ elif app_mode == 'Match Win Prediction':
             balls_left = 120 - (int(overs) * 6 + round((overs % 1) * 10))
             wickets_left = 10 - wickets
 
-            # Handle edge cases before making a prediction
             if runs_left <= 0:
                 st.success(f"{batting_team} has a 100% win probability.")
             elif balls_left <= 0 or wickets_left <= 0:
-                 st.error(f"{batting_team} has a 0% win probability.")
+                st.error(f"{batting_team} has a 0% win probability.")
             else:
                 input_df = pd.DataFrame({
                     'batting_team': [batting_team], 'bowling_team': [bowling_team], 'city': [city],
@@ -147,5 +143,5 @@ elif app_mode == 'Match Win Prediction':
                 with col7:
                     st.metric(label=f"{batting_team} Win %", value=f"{win_prob:.0%}")
                 with col8:
-                     st.metric(label=f"{bowling_team} Win %", value=f"{loss_prob:.0%}")
+                    st.metric(label=f"{bowling_team} Win %", value=f"{loss_prob:.0%}")
                 st.progress(win_prob)
