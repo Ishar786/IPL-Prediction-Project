@@ -50,7 +50,7 @@ def get_ui_and_role_data(full_data):
         'teams': sorted([team for team in full_data['team1'].unique() if pd.notna(team)]),
         'venues': sorted([venue for venue in full_data['venue'].unique() if pd.notna(venue)]),
         'cities': sorted([city for city in full_data['city'].dropna().unique() if pd.notna(city)]),
-        'players': sorted([p for p in all_players if p]), # Filter out any potential None/NaN players
+        'players': sorted([p for p in all_players if p]),  # Filter out any potential None/NaN players
         'player_roles': player_roles
     }
     return ui_data
@@ -101,17 +101,21 @@ def train_win_pipeline(full_data):
     # Filter only 2nd innings
     win_df = full_data[full_data['inning'] == 2].copy()
     
-    # If 'target_runs' is not present, calculate it from first innings
+    # Ensure 'target_runs' column is available
     if 'target_runs' not in win_df.columns:
         # Get total runs from first innings
         first_innings_runs = full_data[full_data['inning'] == 1] \
             .groupby('match_id')['total_runs'].sum().reset_index()
         first_innings_runs.rename(columns={'total_runs': 'target_runs'}, inplace=True)
         first_innings_runs['target_runs'] += 1  # Add 1 run to win
-
+        
         # Merge with second innings data only
         win_df = win_df.merge(first_innings_runs, on='match_id', how='left')
 
+        # Check if there are missing target_runs values after merging
+        if win_df['target_runs'].isnull().any():
+            raise ValueError("Missing 'target_runs' values after merging first innings data. Check the merge logic.")
+    
     # Create features
     win_df['current_score'] = win_df.groupby('match_id')['total_runs'].cumsum()
     win_df['runs_left'] = win_df['target_runs'] - win_df['current_score']
