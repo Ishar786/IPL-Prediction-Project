@@ -56,7 +56,8 @@ def train_batsman_pipeline(full_data):
     y = df["avg_runs"]
 
     pre = ColumnTransformer([
-        ("enc", OneHotEncoder(sparse=False, handle_unknown="ignore"), ["batsman"])
+        ("enc", OneHotEncoder(sparse_output=False, handle_unknown="ignore")
+)
     ], remainder="drop")
 
     pipe = Pipeline([
@@ -79,7 +80,8 @@ def train_bowler_pipelines(full_data):
     # Runs model
     Xr, yr = bowl_runs[["bowler"]], bowl_runs["avg_runs"]
     pre_r = ColumnTransformer([
-        ("enc", OneHotEncoder(sparse=False, handle_unknown="ignore"), ["bowler"])
+        ("enc", OneHotEncoder(sparse_output=False, handle_unknown="ignore")
+)
     ], remainder="drop")
     runs_pipe = Pipeline([
         ("pre", pre_r),
@@ -151,8 +153,8 @@ def train_win_pipeline(full_data):
 
     pipe = Pipeline([
         ('pre', ColumnTransformer([
-            ('enc', OneHotEncoder(sparse=False, handle_unknown='ignore'),
-             ['batting_team', 'bowling_team', 'city'])
+            ('enc', OneHotEncoder(sparse_output=False, handle_unknown="ignore")
+)
         ], remainder='passthrough')),
         ('clf', LogisticRegression(solver='liblinear', max_iter=200))
     ])
